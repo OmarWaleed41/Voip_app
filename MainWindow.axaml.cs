@@ -28,6 +28,8 @@ public partial class MainWindow : Window
     private UdpClient? _signalingSocket;
     private const int SIGNALING_PORT = 5000;
 
+    private DispatcherTimer? _statsTimer;
+
     public MainWindow()
     {
         InitializeComponent();
@@ -50,6 +52,26 @@ public partial class MainWindow : Window
         });
     }
 
+
+    private void StartStatsLogging()
+{
+    _statsTimer = new DispatcherTimer { Interval = TimeSpan.FromSeconds(2) };
+    _statsTimer.Tick += (s, e) =>
+    {
+        if (_audioSource != null)
+        {
+            var s1 = _audioSource.GetStats();
+            Log($"[SRC] active={s1.IsActive} overrun={s1.OverrunCount} dropped={s1.DroppedFrames}");
+        }
+        if (_audioSink != null)
+        {
+            var s2 = _audioSink.GetStats();
+            Log($"[SINK] active={s2.IsActive} underrun={s2.UnderrunCount} dropped={s2.DroppedFrames} queueDepth={s2.QueueDepth}");
+        }
+    };
+    _statsTimer.Start();
+}
+
     private void InitializeAudioHardware()
     {
         try
@@ -58,7 +80,7 @@ public partial class MainWindow : Window
 
             _rtcConfig = new RTCConfiguration { iceServers = new List<RTCIceServer>() };
 
-            _audioSource = new SDL3AudioSource(null, _audioEncoder);
+            _audioSource = new SDL3AudioSource(null, _audioEncoder, 160);
             _audioSource.OnAudioSourceEncodedSample += BroadcastLocalAudio;
             _audioSource.StartAudio();
 
@@ -188,6 +210,11 @@ public partial class MainWindow : Window
                     statusBlock.Text = $"Status: {peerId} is {state}";
                 }
             });
+
+            if (state == RTCPeerConnectionState.connected && _statsTimer == null)
+            {
+                StartStatsLogging();
+            }
         };
 
         peerConnection.OnAudioFormatsNegotiated += formats =>
