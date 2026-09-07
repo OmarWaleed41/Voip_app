@@ -21,19 +21,18 @@ public partial class MainWindow : Window
     private readonly ConcurrentDictionary<string, RTCPeerConnection> _activePeers = new();
     
     private SDL3AudioSource? _audioSource;
+    private SDL3AudioEndPoint? _audioSink;
     private AudioEncoder _audioEncoder = new AudioEncoder();
     
     private RTCConfiguration? _rtcConfig;
     private UdpClient? _signalingSocket;
     private const int SIGNALING_PORT = 5000;
-    private string? _cachedWireGuardIp;
+
     public MainWindow()
     {
         InitializeComponent();
         InitializeAudioHardware();
         StartSignalingListener();
-        _cachedWireGuardIp = GetWireGuardLocalIp();
-        Log($"Detected WireGuard IP: {_cachedWireGuardIp ?? "none found"}");
     }
 
     private void Log(string message)
@@ -55,19 +54,15 @@ public partial class MainWindow : Window
     {
         try
         {
-            // Set iceServers to empty for direct IP / WireGuard links (no public STUN needed)
-            _rtcConfig = new RTCConfiguration
-            {
-                iceServers = new List<RTCIceServer>()
-            };
+            _rtcConfig = new RTCConfiguration { iceServers = new List<RTCIceServer>() };
 
-            int samplingRate = 8000;
-
-            _audioSource = new SDL3AudioSource(null, _audioEncoder, samplingRate);
+            _audioSource = new SDL3AudioSource(null, _audioEncoder); // was: new SDL3AudioSource(null, _audioEncoder, samplingRate)
             _audioSource.OnAudioSourceEncodedSample += BroadcastLocalAudio;
             _audioSource.StartAudio();
 
-            Log("SDL3 Audio Source initialized successfully.");
+            _audioSink = new SDL3AudioEndPoint(null, _audioEncoder);
+
+            Log("SDL3 Audio Source/Sink initialized successfully.");
         }
         catch (Exception ex)
         {
@@ -168,22 +163,15 @@ public partial class MainWindow : Window
                 string candidateStr = candidate.candidate;
 
                 // Simple check: if local host candidate isn't on the target subnet, rewrite or filter it
-                if (candidateStr.Contains("typ host"))
+                if (candidateStr.Contains("typ host") && !candidateStr.Contains("10.0.0."))
                 {
-                    var wgIp = _cachedWireGuardIp; // resolved once in InitializeAudioHardware or ctor
-                    if (wgIp != null)
-                    {
-                        // replace whatever LAN IP got picked with the real WG IP
-                        var match = System.Text.RegularExpressions.Regex.Match(candidateStr, @"\b\d{1,3}(\.\d{1,3}){3}\b");
-                        if (match.Success && match.Value != wgIp)
-                        {
-                            candidateStr = candidateStr.Replace(match.Value, wgIp);
-                        }
-                    }
+                    // Replaces local LAN IP with your local VPN/WireGuard IP if auto-discovery grabs the wrong interface
+                    // Replace '10.0.0.1' with your actual local 10.0.0.x IP address on this host
+                    candidateStr = candidateStr.Replace("192.168.1.103", "10.0.0.1");
                 }
 
-                Log($"[ICE Candidate Sent - RAW]: {candidate.candidate}");
-                sendSignalingMessage($"CANDIDATE:{candidate.candidate}");
+                Log($"[ICE Candidate Sent]: {candidateStr}");
+                sendSignalingMessage($"CANDIDATE:{candidateStr}");
             }
         };
 
@@ -198,6 +186,21 @@ public partial class MainWindow : Window
                     statusBlock.Text = $"Status: {peerId} is {state}";
                 }
             });
+        };
+
+        peerConnection.OnAudioFormatsNegotiated += formats =>
+        {
+            _audioSource?.SetAudioSourceFormat(formats[0]);
+            _audioSink?.SetAudioSinkFormat(formats[0]); // this also starts playback internally
+        };
+
+        peerConnection.OnRtpPacketReceived += (rep, media, rtpPkt) =>
+        {
+            if (media == SDPMediaTypesEnum.audio && _audioSink != null)
+            {
+                _audioSink.GotAudioRtp(rep, rtpPkt.Header.SyncSource, rtpPkt.Header.SequenceNumber,
+                    rtpPkt.Header.Timestamp, rtpPkt.Header.PayloadType, rtpPkt.Header.MarkerBit == 1, rtpPkt.Payload);
+            }
         };
 
         _activePeers[peerId] = peerConnection;
@@ -264,23 +267,6 @@ public partial class MainWindow : Window
                 peer.SendAudio(duration, sample);
             }
         }
-    }
-
-    private static string? GetWireGuardLocalIp()
-    {
-        foreach (var ni in System.Net.NetworkInformation.NetworkInterface.GetAllNetworkInterfaces())
-        {
-            if (ni.Name.Contains("wg", StringComparison.OrdinalIgnoreCase) ||
-                ni.Description.Contains("WireGuard", StringComparison.OrdinalIgnoreCase))
-            {
-                foreach (var addr in ni.GetIPProperties().UnicastAddresses)
-                {
-                    if (addr.Address.AddressFamily == AddressFamily.InterNetwork)
-                        return addr.Address.ToString();
-                }
-            }
-        }
-        return null;
     }
 
     protected override void OnClosed(EventArgs e)
