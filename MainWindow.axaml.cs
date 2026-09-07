@@ -20,7 +20,6 @@ public partial class MainWindow : Window
 {
     private readonly ConcurrentDictionary<string, RTCPeerConnection> _activePeers = new();
     
-    // Valid SIPSorcery Hardware & Media Interfaces
     private SDL3AudioSource? _audioSource;
     private AudioEncoder _audioEncoder = new AudioEncoder();
     
@@ -54,17 +53,14 @@ public partial class MainWindow : Window
     {
         try
         {
+            // Set iceServers to empty for direct IP / WireGuard links (no public STUN needed)
             _rtcConfig = new RTCConfiguration
             {
-                iceServers = new List<RTCIceServer>
-                {
-                    new RTCIceServer { urls = "stun:stun.l.google.com:19302" }
-                }
+                iceServers = new List<RTCIceServer>()
             };
 
             int samplingRate = 8000;
 
-            // SDL3AudioSource acts as the hardware audio capture engine
             _audioSource = new SDL3AudioSource(null, _audioEncoder, samplingRate);
             _audioSource.OnAudioSourceEncodedSample += BroadcastLocalAudio;
             _audioSource.StartAudio();
@@ -81,7 +77,10 @@ public partial class MainWindow : Window
     {
         try
         {
-            _signalingSocket = new UdpClient(SIGNALING_PORT);
+            // Allow socket address reuse for local testing
+            _signalingSocket = new UdpClient();
+            _signalingSocket.Client.SetSocketOption(SocketOptionLevel.Socket, SocketOptionName.ReuseAddress, true);
+            _signalingSocket.Client.Bind(new IPEndPoint(IPAddress.Any, SIGNALING_PORT));
 
             Task.Run(async () =>
             {
@@ -158,14 +157,17 @@ public partial class MainWindow : Window
             peerConnection.addTrack(audioTrack);
         }
 
+        // Log Candidate generation
         peerConnection.onicecandidate += (candidate) =>
         {
             if (candidate != null)
             {
+                Log($"[ICE] Local candidate found: {candidate.candidate}");
                 sendSignalingMessage($"CANDIDATE:{candidate.candidate}");
             }
         };
 
+        // Log Connection State transitions
         peerConnection.onconnectionstatechange += (state) =>
         {
             Log($"[PEER STATE] {peerId}: {state}");
@@ -179,25 +181,18 @@ public partial class MainWindow : Window
             });
         };
 
-        // Automatic internal RTP packet handling
-        peerConnection.OnRtpPacketReceived += (IPEndPoint remoteEndPoint, SDPMediaTypesEnum mediaType, RTPPacket rtpPacket) =>
-        {
-            if (mediaType == SDPMediaTypesEnum.audio)
-            {
-                // Raw payload received from peer connection
-                byte[] payload = rtpPacket.Payload;
-            }
-        };
-
         _activePeers[peerId] = peerConnection;
 
         if (isInitiator)
         {
             var offer = peerConnection.createOffer();
             await peerConnection.setLocalDescription(offer);
+
+            // Give SIPSorcery 500ms to gather local host candidates before sending the offer
+            await Task.Delay(500);
             
-            sendSignalingMessage($"OFFER:{offer.sdp}");
-            Log($"SDP Offer sent to {peerId}.");
+            sendSignalingMessage($"OFFER:{peerConnection.localDescription.sdp}");
+            Log($"SDP Offer (with candidates) sent to {peerId}.");
         }
 
         return peerConnection;
@@ -216,7 +211,9 @@ public partial class MainWindow : Window
             var answer = pc.createAnswer();
             await pc.setLocalDescription(answer);
 
-            sendSignalingMessage($"ANSWER:{answer.sdp}");
+            await Task.Delay(500);
+
+            sendSignalingMessage($"ANSWER:{pc.localDescription.sdp}");
             Log($"SDP ANSWER sent to {peerId}.");
         }
         else if (message.StartsWith("ANSWER:"))
@@ -231,6 +228,7 @@ public partial class MainWindow : Window
         else if (message.StartsWith("CANDIDATE:"))
         {
             string candidateInit = message.Substring(10);
+            Log($"Received remote CANDIDATE from {peerId}");
             if (_activePeers.TryGetValue(peerId, out var pc))
             {
                 pc.addIceCandidate(new RTCIceCandidateInit { candidate = candidateInit });
