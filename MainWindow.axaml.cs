@@ -209,12 +209,12 @@ public partial class MainWindow : Window
                 {
                     statusBlock.Text = $"Status: {peerId} is {state}";
                 }
-            });
 
-            if (state == RTCPeerConnectionState.connected && _statsTimer == null)
-            {
-                StartStatsLogging();
-            }
+                if (state == RTCPeerConnectionState.connected && _statsTimer == null)
+                {
+                    StartStatsLogging();
+                }
+            });
         };
 
         peerConnection.OnAudioFormatsNegotiated += formats =>
