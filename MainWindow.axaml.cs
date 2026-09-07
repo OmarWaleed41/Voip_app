@@ -157,17 +157,27 @@ public partial class MainWindow : Window
             peerConnection.addTrack(audioTrack);
         }
 
-        // Log Candidate generation
+        // Capture candidates generated during ICE gathering
         peerConnection.onicecandidate += (candidate) =>
         {
-            if (candidate != null)
+            if (candidate != null && !string.IsNullOrEmpty(candidate.candidate))
             {
-                Log($"[ICE] Local candidate found: {candidate.candidate}");
-                sendSignalingMessage($"CANDIDATE:{candidate.candidate}");
+                // IF using 10.0.0.x VPN/WireGuard interface, filter out 192.168.x.x local endpoints:
+                string candidateStr = candidate.candidate;
+
+                // Simple check: if local host candidate isn't on the target subnet, rewrite or filter it
+                if (candidateStr.Contains("typ host") && !candidateStr.Contains("10.0.0."))
+                {
+                    // Replaces local LAN IP with your local VPN/WireGuard IP if auto-discovery grabs the wrong interface
+                    // Replace '10.0.0.1' with your actual local 10.0.0.x IP address on this host
+                    candidateStr = candidateStr.Replace("192.168.1.103", "10.0.0.1");
+                }
+
+                Log($"[ICE Candidate Sent]: {candidateStr}");
+                sendSignalingMessage($"CANDIDATE:{candidateStr}");
             }
         };
 
-        // Log Connection State transitions
         peerConnection.onconnectionstatechange += (state) =>
         {
             Log($"[PEER STATE] {peerId}: {state}");
@@ -188,11 +198,11 @@ public partial class MainWindow : Window
             var offer = peerConnection.createOffer();
             await peerConnection.setLocalDescription(offer);
 
-            // Give SIPSorcery 500ms to gather local host candidates before sending the offer
+            // Give SIPSorcery a brief window to gather local candidates
             await Task.Delay(500);
-            
+
             sendSignalingMessage($"OFFER:{peerConnection.localDescription.sdp}");
-            Log($"SDP Offer (with candidates) sent to {peerId}.");
+            Log($"SDP Offer sent to {peerId}.");
         }
 
         return peerConnection;
