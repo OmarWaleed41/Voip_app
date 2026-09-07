@@ -94,6 +94,11 @@ public partial class MainWindow : Window
                 var s2 = _audioSink.GetStats();
                 Log($"[SINK] active={s2.IsActive} underrun={s2.UnderrunCount} dropped={s2.DroppedFrames} queueDepth={s2.QueueDepth}");
             }
+
+            foreach (var kvp in _jitterBuffers)
+            {
+                Log($"[JITTER {kvp.Key}] depth={kvp.Value.Count} (target={JITTER_TARGET_FRAMES})");
+            }
         };
         _statsTimer.Start();
     }
@@ -514,13 +519,24 @@ public partial class MainWindow : Window
                     Payload = payload
                 };
 
-                // Safety valve: if a peer's link hiccups badly and frames pile
-                // up faster than we drain them, don't grow unbounded latency.
-                while (_frames.Count > _targetDepth * 4)
+                // Trim continuously, not just as a last-resort safety valve.
+                // If arrival rate runs even slightly ahead of the 20ms playout
+                // tick - ordinary clock drift, no network problem required -
+                // backlog grows by one frame at a time forever unless something
+                // pulls it back down. Capping slack at target+2 keeps the extra
+                // delay this can ever introduce to ~40-60ms instead of letting
+                // it climb for minutes before any correction kicks in.
+                while (_frames.Count > _targetDepth + 2)
                 {
                     RemoveLowestKey();
                 }
             }
+        }
+
+        /// <summary>Current backlog depth - exposed for diagnostics/logging.</summary>
+        public int Count
+        {
+            get { lock (_lock) { return _frames.Count; } }
         }
 
         public bool TryDequeueNext(out IPEndPoint? rep, out uint ssrc, out ushort seq, out uint ts, out int payloadType, out bool marker, out byte[] payload)
