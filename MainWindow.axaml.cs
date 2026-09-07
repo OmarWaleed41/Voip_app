@@ -54,9 +54,11 @@ public partial class MainWindow : Window
     {
         try
         {
+            SDL3Helper.InitSDL(); // must happen before any SDL3AudioSource/SDL3AudioEndPoint use
+
             _rtcConfig = new RTCConfiguration { iceServers = new List<RTCIceServer>() };
 
-            _audioSource = new SDL3AudioSource(null, _audioEncoder); // was: new SDL3AudioSource(null, _audioEncoder, samplingRate)
+            _audioSource = new SDL3AudioSource(null, _audioEncoder);
             _audioSource.OnAudioSourceEncodedSample += BroadcastLocalAudio;
             _audioSource.StartAudio();
 
