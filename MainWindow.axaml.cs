@@ -19,9 +19,12 @@ namespace Voip;
 public partial class MainWindow : Window
 {
     private readonly ConcurrentDictionary<string, RTCPeerConnection> _activePeers = new();
-    private SDL3AudioSource? _audioSource;
-    private RTCConfiguration? _rtcConfig;
     
+    // Valid SIPSorcery Hardware & Media Interfaces
+    private SDL3AudioSource? _audioSource;
+    private AudioEncoder _audioEncoder = new AudioEncoder();
+    
+    private RTCConfiguration? _rtcConfig;
     private UdpClient? _signalingSocket;
     private const int SIGNALING_PORT = 5000;
 
@@ -32,33 +35,48 @@ public partial class MainWindow : Window
         StartSignalingListener();
     }
 
+    private void Log(string message)
+    {
+        Dispatcher.UIThread.InvokeAsync(() =>
+        {
+            var logBlock = this.FindControl<SelectableTextBlock>("LogTextBlock");
+            var scrollViewer = this.FindControl<ScrollViewer>("LogScrollViewer");
+
+            if (logBlock != null)
+            {
+                logBlock.Text += $"[{DateTime.Now:HH:mm:ss}] {message}\n";
+            }
+            scrollViewer?.ScrollToEnd();
+        });
+    }
+
     private void InitializeAudioHardware()
     {
         try
         {
             _rtcConfig = new RTCConfiguration
             {
-                iceServers = new List<RTCIceServer>() // Peer-to-peer mesh configuration
+                iceServers = new List<RTCIceServer>
+                {
+                    new RTCIceServer { urls = "stun:stun.l.google.com:19302" }
+                }
             };
 
-            IAudioEncoder audioEncoder = new AudioEncoder();
-            string? audioInDeviceName = null;
             int samplingRate = 8000;
 
-            _audioSource = new SDL3AudioSource(audioInDeviceName, audioEncoder, samplingRate);
+            // SDL3AudioSource acts as the hardware audio capture engine
+            _audioSource = new SDL3AudioSource(null, _audioEncoder, samplingRate);
             _audioSource.OnAudioSourceEncodedSample += BroadcastLocalAudio;
-
             _audioSource.StartAudio();
+
+            Log("SDL3 Audio Source initialized successfully.");
         }
         catch (Exception ex)
         {
-            Debug.WriteLine($"Audio Hardware Error: {ex.Message}");
+            Log($"Audio Initialization Error: {ex.Message}");
         }
     }
 
-    // -------------------------------------------------------------------
-    // 1. AVALONIA THREADING & SIGNALING SOCKET
-    // -------------------------------------------------------------------
     private void StartSignalingListener()
     {
         try
@@ -73,7 +91,6 @@ public partial class MainWindow : Window
                     string rawMessage = Encoding.UTF8.GetString(result.Buffer);
                     string senderIp = result.RemoteEndPoint.Address.ToString();
 
-                    // Swap System.Windows.Threading with DispatcherUIThread.InvokeAsync
                     await Dispatcher.UIThread.InvokeAsync(async () =>
                     {
                         await HandleIncomingSignaling(
@@ -84,10 +101,12 @@ public partial class MainWindow : Window
                     });
                 }
             });
+
+            Log($"Listening for signaling on UDP port {SIGNALING_PORT}...");
         }
         catch (Exception ex)
         {
-            Debug.WriteLine($"Failed to bind UDP signaling port {SIGNALING_PORT}: {ex.Message}");
+            Log($"Failed to bind signaling socket: {ex.Message}");
         }
     }
 
@@ -100,23 +119,23 @@ public partial class MainWindow : Window
         }
         catch (Exception ex)
         {
-            Debug.WriteLine($"Failed to send network payload to {targetIp}: {ex.Message}");
+            Log($"Network Send Error ({targetIp}): {ex.Message}");
         }
     }
 
-    // -------------------------------------------------------------------
-    // 2. UI EVENT HANDLERS
-    // -------------------------------------------------------------------
     private async void CallPeerButton_Click(object? sender, RoutedEventArgs e)
     {
-        // Fetch the control instance dynamically if x:Name field auto-generation fails
-        var peerIpTextBox = this.FindControl<TextBox>("PeerIpTextBox");
-        
-        string targetIp = peerIpTextBox?.Text?.Trim() ?? string.Empty;
-        
+        var peerIpBox = this.FindControl<TextBox>("PeerIpTextBox");
+        string targetIp = peerIpBox?.Text?.Trim() ?? string.Empty;
+
         if (!string.IsNullOrEmpty(targetIp))
         {
+            Log($"Initiating P2P call to {targetIp}...");
             await StartCallWithPeer(targetIp);
+        }
+        else
+        {
+            Log("Please enter a valid IP address.");
         }
     }
 
@@ -129,9 +148,6 @@ public partial class MainWindow : Window
         );
     }
 
-    // -------------------------------------------------------------------
-    // 3. WEBRTC P2P SESSION MANAGEMENT
-    // -------------------------------------------------------------------
     public async Task<RTCPeerConnection> AddPeerToMesh(string peerId, bool isInitiator, Action<string> sendSignalingMessage)
     {
         var peerConnection = new RTCPeerConnection(_rtcConfig);
@@ -150,11 +166,26 @@ public partial class MainWindow : Window
             }
         };
 
+        peerConnection.onconnectionstatechange += (state) =>
+        {
+            Log($"[PEER STATE] {peerId}: {state}");
+            Dispatcher.UIThread.InvokeAsync(() =>
+            {
+                var statusBlock = this.FindControl<TextBlock>("StatusTextBlock");
+                if (statusBlock != null)
+                {
+                    statusBlock.Text = $"Status: {peerId} is {state}";
+                }
+            });
+        };
+
+        // Automatic internal RTP packet handling
         peerConnection.OnRtpPacketReceived += (IPEndPoint remoteEndPoint, SDPMediaTypesEnum mediaType, RTPPacket rtpPacket) =>
         {
             if (mediaType == SDPMediaTypesEnum.audio)
             {
-                // Process incoming remote RTP audio payload
+                // Raw payload received from peer connection
+                byte[] payload = rtpPacket.Payload;
             }
         };
 
@@ -166,6 +197,7 @@ public partial class MainWindow : Window
             await peerConnection.setLocalDescription(offer);
             
             sendSignalingMessage($"OFFER:{offer.sdp}");
+            Log($"SDP Offer sent to {peerId}.");
         }
 
         return peerConnection;
@@ -175,6 +207,7 @@ public partial class MainWindow : Window
     {
         if (message.StartsWith("OFFER:"))
         {
+            Log($"Received SDP OFFER from {peerId}");
             string sdp = message.Substring(6);
             
             var pc = await AddPeerToMesh(peerId, isInitiator: false, sendSignalingMessage);
@@ -184,9 +217,11 @@ public partial class MainWindow : Window
             await pc.setLocalDescription(answer);
 
             sendSignalingMessage($"ANSWER:{answer.sdp}");
+            Log($"SDP ANSWER sent to {peerId}.");
         }
         else if (message.StartsWith("ANSWER:"))
         {
+            Log($"Received SDP ANSWER from {peerId}");
             string sdp = message.Substring(7);
             if (_activePeers.TryGetValue(peerId, out var pc))
             {
@@ -203,9 +238,6 @@ public partial class MainWindow : Window
         }
     }
 
-    // -------------------------------------------------------------------
-    // 4. AUDIO STREAMING & CLEANUP
-    // -------------------------------------------------------------------
     private void BroadcastLocalAudio(uint duration, byte[] sample)
     {
         foreach (var peer in _activePeers.Values)
